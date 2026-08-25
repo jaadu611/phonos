@@ -5,8 +5,6 @@ recognizes 521 sound classes and runs efficiently on CPU.
 """
 
 import numpy as np
-import tensorflow as tf
-import tensorflow_hub as hub
 import librosa
 from typing import List, Dict
 
@@ -70,6 +68,9 @@ class AudioAnalyzer:
         """Load YAMNet model and class mappings"""
         if self._loaded:
             return
+
+        import tensorflow as tf
+        import tensorflow_hub as hub
 
         # Suppress TF warnings
         tf.get_logger().setLevel("ERROR")

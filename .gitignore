@@ -3,6 +3,8 @@
 *.pth
 *.onnx
 *.ckpt
+checkpoint/
+checkpoints/
 models_cache/
 pretrained/
 *.wav

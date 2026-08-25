@@ -56,7 +56,7 @@ class StemAmplifier:
         mag = np.abs(stft)
         phase = np.angle(stft)
 
-        freqs = librosa.stft_frequencies(sr=sr, n_fft=2048)
+        freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
 
         # Boost low frequencies
         if low_boost > 0:

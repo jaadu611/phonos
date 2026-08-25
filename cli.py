@@ -65,6 +65,14 @@ Examples:
     remove_parser.add_argument("--output", "-o", help="Output file path")
     remove_parser.add_argument("--device", default="auto", help="Device: cuda, cpu, auto")
 
+    # Restore command (Full Pipeline: Separate -> Restore -> Enhance)
+    restore_parser = subparsers.add_parser("restore", help="Full restoration pipeline (Separate -> VoiceFixer -> Enhance)")
+    restore_parser.add_argument("input", help="Input audio file")
+    restore_parser.add_argument("--query", "-q", required=True, help="What to extract")
+    restore_parser.add_argument("--output", "-o", help="Output file path")
+    restore_parser.add_argument("--gain", type=float, default=10, help="Final gain in dB")
+    restore_parser.add_argument("--device", default="auto", help="Device: cuda, cpu, auto")
+
     # Info command
     info_parser = subparsers.add_parser("info", help="Show audio file info")
     info_parser.add_argument("input", help="Input audio file")
@@ -80,6 +88,8 @@ Examples:
             cmd_analyze(args)
         elif args.command == "extract":
             cmd_extract(args)
+        elif args.command == "restore":
+            cmd_restore(args)
         elif args.command == "remove":
             cmd_remove(args)
         elif args.command == "info":
@@ -134,29 +144,74 @@ def cmd_extract(args):
 
     separator = SourceSeparator(device=args.device)
 
-    with console.status("[bold green]Loading models...[/bold green]"):
-        separator.load()
+    console.print("[bold green]Loading AudioSep model...[/bold green]")
+    separator.load()
 
     console.print(f"[bold]Input:[/bold] {args.input}")
     console.print(f"[bold]Query:[/bold] [cyan]{args.query}[/cyan]")
+    console.print(f"[bold]Device:[/bold] {separator.device}")
 
-    with console.status("[bold green]Separating audio...[/bold green]"):
-        stem = separator.extract(args.input, args.query)
+    console.print("[bold green]Separating audio...[/bold green]")
+    stem = separator.extract(args.input, args.query)
 
     if args.gain > 0:
         amplifier = StemAmplifier()
-        with console.status(f"[bold green]Amplifying by {args.gain}dB...[/bold green]"):
-            stem = amplifier.boost(stem, args.gain)
+        console.print(f"[bold green]Amplifying by {args.gain}dB...[/bold green]")
+        stem = amplifier.boost(stem, args.gain)
         console.print(f"[green]✓[/green] Amplified by {args.gain}dB")
 
-    # Generate output filename if not specified
+    # Generate output filename
     if not args.output:
         input_path = Path(args.input)
-        suffix = args.query.replace(" ", "_")[:20]
-        args.output = str(input_path.parent / f"{input_path.stem}_{suffix}.wav")
+        suffix = args.query.replace(" ", "_")[:20].lower()
+        args.output = str(input_path.parent / f"{input_path.stem}_{suffix}_extracted.wav")
 
     separator.save(stem, args.output)
     console.print(f"[green]✓[/green] Saved: [bold]{args.output}[/bold]")
+    console.print(f"[dim]Duration: {len(stem) / 32000:.2f} seconds[/dim]")
+
+
+def cmd_restore(args):
+    """Full restoration pipeline: separate → restore → enhance"""
+    console.print(Panel.fit("✨ [bold blue]AudioForge Restoration Pipeline[/bold blue]"))
+
+    # Step 1: Separate
+    console.print("\n[bold]Step 1:[/bold] Separating target sound with AudioSep...")
+    separator = SourceSeparator(device=args.device)
+    separator.load()
+    stem = separator.extract(args.input, args.query)
+
+    # Step 2: Restore with VoiceFixer
+    console.print("[bold]Step 2:[/bold] AI restoration & reconstruction with VoiceFixer...")
+    from core.restorer import AudioRestorer
+    restorer = AudioRestorer(device=args.device)
+    restorer.load()
+
+    # VoiceFixer operates at 44100 Hz
+    import librosa
+    import soundfile as sf
+    stem_44k = librosa.resample(stem, orig_sr=32000, target_sr=44100)
+    restored = restorer.restore(stem_44k, sr=44100)
+
+    # Step 3: Amplify
+    if args.gain > 0:
+        amplifier = StemAmplifier()
+        restored = amplifier.boost(restored, args.gain)
+        console.print(f"[green]✓[/green] Amplified by {args.gain}dB")
+
+    # Step 4: Final enhancement
+    amplifier = StemAmplifier()
+    restored = amplifier.prepare_for_analysis(restored, 44100)
+
+    # Save
+    if not args.output:
+        input_path = Path(args.input)
+        args.output = str(input_path.parent / f"{input_path.stem}_restored.wav")
+
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    sf.write(args.output, restored, 44100)
+    console.print(f"[green]✓[/green] Saved: [bold]{args.output}[/bold]")
+    console.print(f"[dim]Duration: {len(restored) / 44100:.2f} seconds (44.1kHz High-Fidelity)[/dim]")
 
 
 def cmd_remove(args):
