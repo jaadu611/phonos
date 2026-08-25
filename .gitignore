@@ -1,0 +1,45 @@
+# Models and weights
+*.pt
+*.pth
+*.onnx
+*.ckpt
+models_cache/
+pretrained/
+*.wav
+*.mp3
+*.flac
+*.ogg
+examples/test_audio/*
+!examples/test_audio/README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary
+tmp/
+temp/
+*.tmp
