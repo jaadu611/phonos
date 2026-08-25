@@ -1,0 +1,11 @@
+{
+  "domain": "urban",
+  "categories": {
+    "speech": {"stem_id": 0, "file_count": 0},
+    "traffic": {"stem_id": 1, "file_count": 0},
+    "car_horns": {"stem_id": 2, "file_count": 0},
+    "sirens": {"stem_id": 3, "file_count": 0},
+    "construction": {"stem_id": 4, "file_count": 0},
+    "subway": {"stem_id": 5, "file_count": 0}
+  }
+}

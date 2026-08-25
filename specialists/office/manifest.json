@@ -1,0 +1,11 @@
+{
+  "domain": "office",
+  "categories": {
+    "speech": {"stem_id": 0, "file_count": 0},
+    "keyboard_typing": {"stem_id": 1, "file_count": 0},
+    "mouse_clicks": {"stem_id": 2, "file_count": 0},
+    "phone_ring": {"stem_id": 3, "file_count": 0},
+    "printer": {"stem_id": 4, "file_count": 0},
+    "air_conditioner": {"stem_id": 5, "file_count": 0}
+  }
+}

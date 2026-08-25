@@ -1,0 +1,11 @@
+{
+  "domain": "nature",
+  "categories": {
+    "speech": {"stem_id": 0, "file_count": 0},
+    "bird_calls": {"stem_id": 1, "file_count": 0},
+    "wind_gusts": {"stem_id": 2, "file_count": 0},
+    "rain_showers": {"stem_id": 3, "file_count": 0},
+    "thunder": {"stem_id": 4, "file_count": 0},
+    "insects": {"stem_id": 5, "file_count": 0}
+  }
+}

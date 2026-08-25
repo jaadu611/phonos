@@ -3,14 +3,23 @@
 *.pth
 *.onnx
 *.ckpt
+*.safetensors
+*.bin
 checkpoint/
 checkpoints/
+.checkpoints/
+specialists/*/checkpoints/
+specialists/checkpoints/
 models_cache/
 pretrained/
+
+# Training and Test Audio Data
 *.wav
 *.mp3
 *.flac
 *.ogg
+*.opus
+training_data/
 examples/test_audio/*
 !examples/test_audio/README.md
 
@@ -37,8 +46,9 @@ env/
 .DS_Store
 Thumbs.db
 
-# Logs
+# Logs & PIDs
 *.log
+*.pid
 logs/
 
 # Temporary
