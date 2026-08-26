@@ -1,13 +1,14 @@
 """
-AudioForge Domain Specialists Suite.
-Lightweight (2M parameter) single-pass separation + generative spectral inpainting models.
+AudioForge Universal Speech Specialist & GAN Backbone.
 """
 
-from .base_unet import SmallUNet, FiLMConditioner
-from .battlefield import BattlefieldSpecialistTrainer
+from .base_unet import HighResSpeechGenerator, MultiScaleSpeechDiscriminator, SpeechSpecialistUNet, SmallUNet
+from .universal_speech.trainer import UniversalSpeechGANTrainer
 
 __all__ = [
+    "HighResSpeechGenerator",
+    "MultiScaleSpeechDiscriminator",
+    "SpeechSpecialistUNet",
     "SmallUNet",
-    "FiLMConditioner",
-    "BattlefieldSpecialistTrainer",
+    "UniversalSpeechGANTrainer",
 ]

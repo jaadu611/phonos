@@ -1,6 +1,6 @@
 """
-AudioForge Battlefield Specialist Training Engine.
-Features live directory scanning, automatic dataset manifest generation, and self-cleaning storage.
+AudioForge Flagship Generative Adversarial Speech Specialist Trainer.
+Trains a high-capacity (~41.3M parameter) Generator + Multi-Scale PatchGAN Discriminator with Feature Matching loss.
 """
 
 import json
@@ -18,29 +18,31 @@ import torch.nn as nn
 import torch.nn.functional as F
 from rich.console import Console
 
-from specialists.base_unet import SmallUNet
+from specialists.base_unet import HighResSpeechGenerator, MultiScaleSpeechDiscriminator
 
 console = Console()
 
 
-class BattlefieldSpecialistTrainer:
+class BattlefieldGANTrainer:
     """
-    Dynamically scans training_data/battlefield/ and trains a self-cleaning universal specialist.
+    Flagship Adversarial Speech Specialist Trainer.
     """
 
     def __init__(
         self,
         hours: float = 14.0,
+        batch_size: int = 4,
+        base_channels: int = 48,
         max_kept_checkpoints: int = 2,
-        speech_dir: str = "training_data/clean_speech",
-        noise_base_dir: str = "training_data/battlefield",
     ):
         self.hours = hours
+        self.batch_size = batch_size
+        self.base_channels = base_channels
         self.max_kept_checkpoints = max_kept_checkpoints
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        self.speech_dir = Path(speech_dir)
-        self.noise_base = Path(noise_base_dir)
+        self.speech_dir = Path("training_data/clean_speech")
+        self.noise_base = Path("training_data/battlefield")
 
         self.specialist_dir = Path("specialists/battlefield")
         self.checkpoint_dir = self.specialist_dir / "checkpoints"
@@ -53,101 +55,61 @@ class BattlefieldSpecialistTrainer:
         self.saved_checkpoints: List[Path] = []
         self.saved_test_wavs: List[Path] = []
 
-        # Audio settings
         self.sr = 16000
         self.segment_duration = 2.0
         self.n_fft = 512
         self.hop_length = 160
-        self.batch_size = 4
 
-        # Dynamic stem indexing
-        self.files_by_stem: Dict[int, List[Path]] = {}
-        self.stem_map: Dict[str, int] = {}
-        self.stem_names: List[str] = []
+        # Generator (~37M params) + Discriminator (~4.3M params)
+        self.generator = HighResSpeechGenerator(base_channels=self.base_channels).to(self.device)
+        self.discriminator = MultiScaleSpeechDiscriminator().to(self.device)
 
-        # Scan directories and write initial manifest
-        self.scan_and_update_manifest()
-
-        # Model (~2.1M parameters)
-        self.model = SmallUNet(
-            base_channels=16,
-            num_classes=max(16, len(self.stem_names)),
-            mode="generate",
-        ).to(self.device)
-        self.model.set_stem_map(self.stem_map)
-
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=0.001,
-            betas=(0.9, 0.999),
+        # Separate Optimizers
+        self.opt_g = torch.optim.AdamW(
+            self.generator.parameters(),
+            lr=0.0002,
+            betas=(0.5, 0.999),
+            weight_decay=1e-5,
+        )
+        self.opt_d = torch.optim.AdamW(
+            self.discriminator.parameters(),
+            lr=0.0002,
+            betas=(0.5, 0.999),
             weight_decay=1e-5,
         )
 
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer,
-            T_max=120000,
-            eta_min=1e-5,
-        )
+        total_steps = int(hours * 3600 * 10)
+        self.sched_g = torch.optim.lr_scheduler.CosineAnnealingLR(self.opt_g, T_max=total_steps, eta_min=1e-5)
+        self.sched_d = torch.optim.lr_scheduler.CosineAnnealingLR(self.opt_d, T_max=total_steps, eta_min=1e-5)
+
+        self.scaler = torch.cuda.amp.GradScaler(enabled=(self.device == "cuda"))
 
         self.step = 0
         self.best_loss = float("inf")
 
-        params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        console.print(f"[bold blue]AudioForge Battlefield Specialist Trainer[/bold blue]")
-        console.print(f"Model: SmallUNet (Dynamic FiLM) | Params: {params:,} (~{params*4/1024/1024:.2f} MB)")
-        console.print(f"Device: {self.device} | Target: {self.hours:.1f} hours | Manifest: {self.specialist_dir / 'manifest.json'}\n")
+        self.load_all_files()
 
-    def scan_and_update_manifest(self):
-        """Scans directories live, builds category index, and saves manifest.json"""
-        self.files_by_stem.clear()
-        self.stem_map.clear()
-        self.stem_names.clear()
+        g_params = sum(p.numel() for p in self.generator.parameters() if p.requires_grad)
+        d_params = sum(p.numel() for p in self.discriminator.parameters() if p.requires_grad)
+        total_p = g_params + d_params
 
-        manifest_data = {
-            "domain": "battlefield",
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "categories": {},
-        }
+        console.print(f"[bold blue]AudioForge Flagship GAN Speech Specialist Trainer[/bold blue]")
+        console.print(f"Generator: HighResSpeechGenerator  | Params: {g_params:,} (~{g_params*4/1024/1024:.2f} MB)")
+        console.print(f"Discriminator: MultiScalePatchGAN  | Params: {d_params:,} (~{d_params*4/1024/1024:.2f} MB)")
+        console.print(f"Total Pipeline: {total_p:,} (~{total_p*4/1024/1024:.2f} MB) | AMP: Active | Batch: {self.batch_size}\n")
 
-        # 0: Clean Speech
-        speech_files = list(self.speech_dir.rglob("*.flac")) + list(self.speech_dir.rglob("*.wav"))
-        self.files_by_stem[0] = speech_files
-        self.stem_map["speech"] = 0
-        self.stem_names.append("speech")
-        manifest_data["categories"]["speech"] = {
-            "stem_id": 0,
-            "file_count": len(speech_files),
-            "sample_files": [f.name for f in speech_files[:5]],
-        }
+    def load_all_files(self):
+        self.speech_files = list(self.speech_dir.rglob("*.flac")) + list(self.speech_dir.rglob("*.wav"))
+        console.print(f"  Clean Speech Pool : {len(self.speech_files)} files")
 
-        # 1+: Dynamically discovered noise folders
-        cid = 1
+        self.noise_files: Dict[str, List[Path]] = {}
         for cat_dir in sorted(self.noise_base.iterdir()):
             if cat_dir.is_dir():
-                cat_name = cat_dir.name
-                files = list(cat_dir.glob("*.wav")) + list(cat_dir.glob("*.flac")) + list(cat_dir.glob("*.mp3")) + list(cat_dir.glob("*.ogg"))
+                files = list(cat_dir.glob("*.wav")) + list(cat_dir.glob("*.flac")) + list(cat_dir.glob("*.mp3"))
                 if files:
-                    self.files_by_stem[cid] = files
-                    self.stem_map[cat_name] = cid
-                    self.stem_names.append(cat_name)
-                    manifest_data["categories"][cat_name] = {
-                        "stem_id": cid,
-                        "file_count": len(files),
-                        "sample_files": [f.name for f in files[:5]],
-                    }
-                    cid += 1
+                    self.noise_files[cat_dir.name] = files
+                    console.print(f"  Combat Noise [{cat_dir.name:18s}]: {len(files)} files")
 
-        manifest_data["total_categories"] = len(self.stem_names)
-        manifest_data["total_files"] = sum(len(f) for f in self.files_by_stem.values())
-
-        # Write manifest.json
-        manifest_path = self.specialist_dir / "manifest.json"
-        with open(manifest_path, "w") as f:
-            json.dump(manifest_data, f, indent=2)
-
-        console.print(f"[bold green]Dataset Manifest Updated:[/bold green] {len(self.stem_names)} categories, {manifest_data['total_files']} total audio files.")
-        for name in self.stem_names:
-            console.print(f"  [{self.stem_map[name]:2d}] {name:22s}: {len(self.files_by_stem[self.stem_map[name]])} files")
         console.print()
 
     def load_audio_segment(self, path: Path) -> np.ndarray:
@@ -163,84 +125,60 @@ class BattlefieldSpecialistTrainer:
         start = random.randint(0, len(audio) - samples_needed)
         return audio[start : start + samples_needed]
 
-    def generate_pair(self) -> Tuple[np.ndarray, np.ndarray, int]:
+    def generate_pair(self) -> Tuple[np.ndarray, np.ndarray]:
         samples = int(self.sr * self.segment_duration)
-        available_ids = list(self.files_by_stem.keys())
 
-        # Pick 2 to 5 random sounds to mix
-        num_sounds = random.randint(2, min(5, len(available_ids)))
-        active_ids = random.sample(available_ids, num_sounds)
+        # 1. Clean speech
+        clean_speech = self.load_audio_segment(random.choice(self.speech_files))
+        peak_speech = np.max(np.abs(clean_speech)) + 1e-8
+        clean_speech = (clean_speech / peak_speech) * random.uniform(0.65, 0.85)
 
-        # Select extraction target stem
-        target_id = random.choice(active_ids)
+        # 2. Layer 1 to 4 combat noises
+        num_noises = random.randint(1, min(4, len(self.noise_files)))
+        active_cats = random.sample(list(self.noise_files.keys()), num_noises)
 
-        stem_waveforms = {}
-        for s_id in active_ids:
-            files = self.files_by_stem.get(s_id, [])
-            if files:
-                wav = self.load_audio_segment(random.choice(files))
-            else:
-                wav = np.random.randn(samples) * 0.05
+        noise_layers = []
+        for cat in active_cats:
+            n_file = random.choice(self.noise_files[cat])
+            n_wav = self.load_audio_segment(n_file)
+            n_peak = np.max(np.abs(n_wav)) + 1e-8
+            gain = 10.0 ** (random.uniform(-8.0, 4.0) / 20.0)
+            noise_layers.append((n_wav / n_peak) * 0.6 * gain)
 
-            gain = 10.0 ** (random.uniform(-6.0, 6.0) / 20.0)
-            peak = np.max(np.abs(wav)) + 1e-8
-            stem_waveforms[s_id] = (wav / peak) * 0.7 * gain
+        total_noise = sum(noise_layers) if noise_layers else np.zeros(samples, dtype=np.float32)
 
-        target_waveform = stem_waveforms[target_id]
-        mixture = sum(stem_waveforms.values())
+        if random.random() < 0.30:
+            total_noise = np.tanh(total_noise * random.uniform(1.2, 1.8))
+
+        mixture = clean_speech + total_noise
 
         mix_peak = np.max(np.abs(mixture))
         if mix_peak > 0.95:
             scale = 0.95 / mix_peak
             mixture *= scale
-            target_waveform *= scale
+            clean_speech *= scale
 
         mix_stft = librosa.stft(mixture.astype(np.float32), n_fft=self.n_fft, hop_length=self.hop_length)
-        tgt_stft = librosa.stft(target_waveform.astype(np.float32), n_fft=self.n_fft, hop_length=self.hop_length)
+        tgt_stft = librosa.stft(clean_speech.astype(np.float32), n_fft=self.n_fft, hop_length=self.hop_length)
 
         return (
             np.stack([mix_stft.real, mix_stft.imag], axis=0),
             np.stack([tgt_stft.real, tgt_stft.imag], axis=0),
-            target_id,
         )
 
-    def generate_batch(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        batch_x, batch_y, batch_prompts = [], [], []
+    def generate_batch(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_x, batch_y = [], []
         for _ in range(self.batch_size):
-            x, y, prompt_id = self.generate_pair()
+            x, y = self.generate_pair()
             batch_x.append(x)
             batch_y.append(y)
-            batch_prompts.append(prompt_id)
 
         return (
             torch.tensor(np.array(batch_x), dtype=torch.float32),
             torch.tensor(np.array(batch_y), dtype=torch.float32),
-            torch.tensor(batch_prompts, dtype=torch.long),
         )
 
-    def compute_loss(self, predicted: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
-        pred_mag = torch.sqrt(predicted[:, 0] ** 2 + predicted[:, 1] ** 2 + 1e-8)
-        tgt_mag = torch.sqrt(target[:, 0] ** 2 + target[:, 1] ** 2 + 1e-8)
-
-        recon_loss = F.l1_loss(predicted, target)
-        mag_loss = F.l1_loss(pred_mag, tgt_mag)
-
-        inactive_mask = tgt_mag < 0.01
-        if inactive_mask.any():
-            crosstalk_loss = pred_mag[inactive_mask].mean() * 4.0
-        else:
-            crosstalk_loss = torch.tensor(0.0, device=self.device)
-
-        total_loss = 0.40 * recon_loss + 0.40 * mag_loss + 0.20 * crosstalk_loss
-
-        return total_loss, {
-            "recon": recon_loss.item(),
-            "mag": mag_loss.item(),
-            "crosstalk": crosstalk_loss.item(),
-        }
-
     def clean_old_artifacts(self):
-        """Self-cleaning storage management"""
         while len(self.saved_checkpoints) > self.max_kept_checkpoints:
             old_ckpt = self.saved_checkpoints.pop(0)
             if old_ckpt.exists() and "best" not in old_ckpt.name:
@@ -249,7 +187,7 @@ class BattlefieldSpecialistTrainer:
                 except Exception:
                     pass
 
-        while len(self.saved_test_wavs) > 6:
+        while len(self.saved_test_wavs) > 4:
             old_wav = self.saved_test_wavs.pop(0)
             if old_wav.exists():
                 try:
@@ -258,34 +196,87 @@ class BattlefieldSpecialistTrainer:
                     pass
 
     def train(self):
-        console.print(f"[bold green]Starting {self.hours:.1f}-Hour Battlefield Specialist Training[/bold green]\n")
+        console.print(f"[bold green]Starting {self.hours:.1f}-Hour High-Capacity GAN Training[/bold green]\n")
 
         start_time = time.time()
         target_seconds = self.hours * 3600.0
 
         while time.time() - start_time < target_seconds:
-            # Rescan directory pool periodically (every 5000 steps)
-            if self.step % 5000 == 0 and self.step > 0:
-                self.scan_and_update_manifest()
-                self.model.set_stem_map(self.stem_map)
-
-            batch_x, batch_y, batch_prompts = self.generate_batch()
+            batch_x, batch_y = self.generate_batch()
             batch_x = batch_x.to(self.device)
             batch_y = batch_y.to(self.device)
-            batch_prompts = batch_prompts.to(self.device)
 
-            self.optimizer.zero_grad()
-            predicted = self.model(batch_x, prompt=batch_prompts)
+            # =========================================================
+            # 1. TRAIN DISCRIMINATOR
+            # =========================================================
+            self.opt_d.zero_grad()
+            with torch.cuda.amp.autocast(enabled=(self.device == "cuda")):
+                with torch.no_grad():
+                    fake_y = self.generator(batch_x)
 
-            loss, metrics = self.compute_loss(predicted, batch_y)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
+                # Real scores
+                scores_real, _ = self.discriminator(batch_y)
+                loss_d_real = sum(torch.mean((s - 1.0) ** 2) for s in scores_real) / len(scores_real)
 
-            self.optimizer.step()
-            self.scheduler.step()
+                # Fake scores
+                scores_fake, _ = self.discriminator(fake_y.detach())
+                loss_d_fake = sum(torch.mean(s ** 2) for s in scores_fake) / len(scores_fake)
 
-            if loss.item() < self.best_loss:
-                self.best_loss = loss.item()
+                loss_d = 0.5 * (loss_d_real + loss_d_fake)
+
+            self.scaler.scale(loss_d).backward()
+            self.scaler.unscale_(self.opt_d)
+            torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), 5.0)
+            self.scaler.step(self.opt_d)
+
+            # =========================================================
+            # 2. TRAIN GENERATOR
+            # =========================================================
+            self.opt_g.zero_grad()
+            with torch.cuda.amp.autocast(enabled=(self.device == "cuda")):
+                fake_y = self.generator(batch_x)
+
+                # A. Content Reconstruction (Complex + Magnitude)
+                pred_mag = torch.sqrt(fake_y[:, 0] ** 2 + fake_y[:, 1] ** 2 + 1e-8)
+                tgt_mag = torch.sqrt(batch_y[:, 0] ** 2 + batch_y[:, 1] ** 2 + 1e-8)
+                recon_loss = F.l1_loss(fake_y, batch_y)
+                mag_loss = F.l1_loss(pred_mag, tgt_mag)
+                hf_loss = F.l1_loss(pred_mag[:, 24:], tgt_mag[:, 24:])
+
+                # B. Adversarial Loss (Fool the Discriminator)
+                scores_gen, feats_fake = self.discriminator(fake_y)
+                loss_adv = sum(torch.mean((s - 1.0) ** 2) for s in scores_gen) / len(scores_gen)
+
+                # C. Feature Matching Loss (Texture Consistency)
+                with torch.no_grad():
+                    _, feats_real = self.discriminator(batch_y)
+
+                loss_fm = 0.0
+                for f_fake_scale, f_real_scale in zip(feats_fake, feats_real):
+                    for f_f, f_r in zip(f_fake_scale, f_real_scale):
+                        loss_fm += F.l1_loss(f_f, f_r)
+                loss_fm = loss_fm / (len(feats_fake) * len(feats_fake[0]))
+
+                # Total Generator Loss
+                loss_g = (
+                    0.30 * recon_loss +
+                    0.30 * mag_loss +
+                    0.20 * hf_loss +
+                    0.10 * loss_adv +
+                    1.00 * loss_fm
+                )
+
+            self.scaler.scale(loss_g).backward()
+            self.scaler.unscale_(self.opt_g)
+            torch.nn.utils.clip_grad_norm_(self.generator.parameters(), 5.0)
+            self.scaler.step(self.opt_g)
+
+            self.scaler.update()
+            self.sched_g.step()
+            self.sched_d.step()
+
+            if loss_g.item() < self.best_loss:
+                self.best_loss = loss_g.item()
                 self.save_checkpoint(is_best=True)
 
             elapsed = time.time() - start_time
@@ -293,40 +284,40 @@ class BattlefieldSpecialistTrainer:
 
             if self.step % 200 == 0 or self.step == 1:
                 remaining_h = max(0.0, (target_seconds - elapsed) / 3600.0)
-                lr = self.scheduler.get_last_lr()[0]
+                lr = self.sched_g.get_last_lr()[0]
                 console.print(
                     f"  Step [bold cyan]{self.step:6d}[/bold cyan] | "
-                    f"Loss: [bold yellow]{loss.item():.5f}[/bold yellow] | "
-                    f"Best: [bold green]{self.best_loss:.5f}[/bold green] | "
-                    f"Recon: {metrics['recon']:.4f} | "
+                    f"Gen: [bold yellow]{loss_g.item():.4f}[/bold yellow] | "
+                    f"Adv: {loss_adv.item():.4f} | "
+                    f"FM: {loss_fm.item():.4f} | "
+                    f"Disc: {loss_d.item():.4f} | "
                     f"LR: {lr:.6f} | "
                     f"Elapsed: {elapsed/3600:.2f}h | "
                     f"Remaining: {remaining_h:.2f}h"
                 )
 
-            # Checkpoint, test audio & cleanup every 2,000 steps
-            if self.step % 2000 == 0:
+            # Export audio & checkpoint every 1,000 steps
+            if self.step % 1000 == 0:
                 self.save_checkpoint(is_best=False)
-                self.test_multi_stems()
+                self.test_speech_extraction()
                 self.clean_old_artifacts()
 
         self.save_checkpoint(is_best=True)
-        self.test_multi_stems()
+        self.test_speech_extraction()
         self.clean_old_artifacts()
-        console.print(f"\n[bold green]✓ Battlefield Training Complete![/bold green] Total Steps: {self.step:,} | Best Loss: {self.best_loss:.5f}")
+        console.print(f"\n[bold green]✓ GAN Training Complete![/bold green] Total Steps: {self.step:,} | Best Loss: {self.best_loss:.5f}")
 
     def save_checkpoint(self, is_best: bool = False):
-        filename = f"battlefield_step{self.step}.pt" if not is_best else "battlefield_specialist_best.pt"
+        filename = f"battlefield_gan_step{self.step}.pt" if not is_best else "battlefield_speech_specialist_best.pt"
         path = self.checkpoint_dir / filename
         torch.save(
             {
                 "step": self.step,
-                "model_state_dict": self.model.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
+                "generator_state_dict": self.generator.state_dict(),
+                "discriminator_state_dict": self.discriminator.state_dict(),
                 "loss": self.best_loss,
-                "domain": "battlefield",
-                "stem_map": self.stem_map,
-                "stem_names": self.stem_names,
+                "base_channels": self.base_channels,
+                "domain": "battlefield_speech_gan",
             },
             str(path),
         )
@@ -334,46 +325,48 @@ class BattlefieldSpecialistTrainer:
             self.saved_checkpoints.append(path)
             console.print(f"  [green]✓ Saved Checkpoint:[/green] {path}")
 
-    def test_multi_stems(self):
-        """Extract Speech, Gunfire, and Explosions from composite mix"""
-        test_file = Path("examples/test_audio/podcast_battlefield_mix.wav")
+    def test_speech_extraction(self):
+        test_file = Path("examples/test_audio/long_combat_mission_benchmark.wav")
+        if not test_file.exists():
+            test_file = Path("examples/test_audio/podcast_battlefield_mix.wav")
         if not test_file.exists():
             return
 
         audio, sr = librosa.load(str(test_file), sr=self.sr, mono=True)
         chunk_samples = int(self.sr * self.segment_duration)
 
-        self.model.eval()
+        self.generator.eval()
         with torch.no_grad():
-            for target_stem in ["speech", "gunfire", "explosions"]:
-                enhanced_chunks = []
-                for i in range(0, len(audio), chunk_samples):
-                    chunk = audio[i : i + chunk_samples]
-                    if len(chunk) < chunk_samples:
-                        chunk = np.pad(chunk, (0, chunk_samples - len(chunk)))
+            enhanced_chunks = []
+            for i in range(0, len(audio), chunk_samples):
+                chunk = audio[i : i + chunk_samples]
+                if len(chunk) < chunk_samples:
+                    chunk = np.pad(chunk, (0, chunk_samples - len(chunk)))
 
-                    stft = librosa.stft(chunk, n_fft=self.n_fft, hop_length=self.hop_length)
-                    features = np.stack([stft.real, stft.imag])
-                    input_tensor = torch.tensor(features, dtype=torch.float32).unsqueeze(0).to(self.device)
+                stft = librosa.stft(chunk, n_fft=self.n_fft, hop_length=self.hop_length)
+                features = np.stack([stft.real, stft.imag])
+                input_tensor = torch.tensor(features, dtype=torch.float32).unsqueeze(0).to(self.device)
 
-                    pred = self.model(input_tensor, prompt=target_stem)
-                    pred_stft = pred[0, 0].cpu().numpy() + 1j * pred[0, 1].cpu().numpy()
-                    enhanced_chunk = librosa.istft(pred_stft, hop_length=self.hop_length)
-                    enhanced_chunks.append(enhanced_chunk)
+                with torch.cuda.amp.autocast(enabled=(self.device == "cuda")):
+                    pred = self.generator(input_tensor)
 
-                enhanced_audio = np.concatenate(enhanced_chunks)[: len(audio)]
-                peak = np.max(np.abs(enhanced_audio))
-                if peak > 0:
-                    enhanced_audio = enhanced_audio / peak * 0.9
+                pred_stft = pred[0, 0].float().cpu().numpy() + 1j * pred[0, 1].float().cpu().numpy()
+                enhanced_chunk = librosa.istft(pred_stft, hop_length=self.hop_length)
+                enhanced_chunks.append(enhanced_chunk)
 
-                out_path = self.test_audio_dir / f"battlefield_step{self.step}_{target_stem}.wav"
-                sf.write(str(out_path), enhanced_audio, self.sr)
-                self.saved_test_wavs.append(out_path)
-                console.print(f"  [green]✓ Exported {target_stem.upper()} Stem:[/green] [bold]{out_path}[/bold]")
+            enhanced_audio = np.concatenate(enhanced_chunks)[: len(audio)]
+            peak = np.max(np.abs(enhanced_audio))
+            if peak > 0:
+                enhanced_audio = enhanced_audio / peak * 0.9
 
-        self.model.train()
+            out_path = self.test_audio_dir / f"battlefield_speech_step{self.step}.wav"
+            sf.write(str(out_path), enhanced_audio, self.sr)
+            self.saved_test_wavs.append(out_path)
+            console.print(f"  [green]✓ Exported GAN Test Audio:[/green] [bold]{out_path}[/bold]")
+
+        self.generator.train()
 
 
 if __name__ == "__main__":
-    trainer = BattlefieldSpecialistTrainer(hours=14.0, max_kept_checkpoints=2)
+    trainer = BattlefieldGANTrainer(hours=14.0, batch_size=4, base_channels=48, max_kept_checkpoints=2)
     trainer.train()

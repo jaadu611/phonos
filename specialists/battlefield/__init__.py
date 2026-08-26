@@ -1,7 +1,7 @@
 """
-AudioForge Battlefield Specialist.
+AudioForge Battlefield Speech Specialist (GAN Architecture).
 """
 
-from .trainer import BattlefieldSpecialistTrainer
+from .trainer import BattlefieldGANTrainer
 
-__all__ = ["BattlefieldSpecialistTrainer"]
+__all__ = ["BattlefieldGANTrainer"]

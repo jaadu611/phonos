@@ -1,206 +1,244 @@
 """
-Universal SmallUNet Architecture with FiLM Prompt Conditioning.
-Core backbone for all AudioForge domain specialists (Battlefield, Office, Urban, Nature).
+AudioForge Flagship 45.6M Parameter Generative Adversarial Speech Specialist.
+Features:
+- High-Capacity Residual & Dilated Speech Generator (~37.0M params)
+- Spectral-Normalized Multi-Scale PatchGAN Discriminator (~8.6M params, HiFi-GAN style)
+- Lipschitz-constrained adversarial critic to prevent discriminator overpower/gradient vanishing
+- Direct Complex STFT Phase & Harmonic Formant Inpainting
 """
 
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Dict, List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils import spectral_norm
 
 
-class DoubleConv(nn.Module):
-    """(Conv2D -> BatchNorm -> ReLU) * 2"""
+# =========================================================================
+# 1. FLAGSHIP RESIDUAL DILATED GENERATOR (~37.0M Parameters)
+# =========================================================================
 
-    def __init__(self, in_channels: int, out_channels: int, mid_channels: int = None):
+class DilatedResidualBlock(nn.Module):
+    """Residual block with dilated convolutions for long-range temporal acoustic context"""
+
+    def __init__(self, channels: int, dilation: int = 1):
         super().__init__()
-        if mid_channels is None:
-            mid_channels = out_channels
-
-        self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+        self.conv1 = nn.Conv2d(
+            channels,
+            channels,
+            kernel_size=3,
+            padding=dilation,
+            dilation=dilation,
+            bias=False,
         )
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.act1 = nn.LeakyReLU(0.2, inplace=True)
+
+        self.conv2 = nn.Conv2d(
+            channels,
+            channels,
+            kernel_size=3,
+            padding=1,
+            bias=False,
+        )
+        self.bn2 = nn.BatchNorm2d(channels)
+        self.act2 = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.double_conv(x)
+        res = x
+        out = self.act1(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        return self.act2(out + res)
 
 
-class Down(nn.Module):
-    """Downscaling with maxpool then double conv"""
-
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(2),
-            DoubleConv(in_channels, out_channels),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.maxpool_conv(x)
-
-
-class Up(nn.Module):
-    """Upscaling then double conv with skip connection"""
-
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
-        self.conv = DoubleConv(in_channels, out_channels)
-
-    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
-        x1 = self.up(x1)
-
-        diffY = x2.size()[2] - x1.size()[2]
-        diffX = x2.size()[3] - x1.size()[3]
-
-        x1 = F.pad(
-            x1,
-            [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2],
-        )
-
-        x = torch.cat([x2, x1], dim=1)
-        return self.conv(x)
-
-
-class FiLMConditioner(nn.Module):
+class HighResSpeechGenerator(nn.Module):
     """
-    Generates feature-wise scale (gamma) and shift (beta) modulations
-    based on the requested sound stem.
+    37.0M Parameter Deep Residual Speech Generator.
+    Operates on complex STFT spectrograms with dilated receptive fields for phoneme inpainting.
     """
 
-    def __init__(self, num_classes: int = 32, embed_dim: int = 128, feature_dim: int = 256):
+    def __init__(self, base_channels: int = 48):
         super().__init__()
-        self.embedding = nn.Embedding(num_classes, embed_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, feature_dim * 2),
-        )
-
-    def forward(self, class_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        emb = self.embedding(class_ids)
-        mod = self.mlp(emb)
-        gamma, beta = torch.chunk(mod, 2, dim=-1)
-        gamma = gamma.unsqueeze(-1).unsqueeze(-1)
-        beta = beta.unsqueeze(-1).unsqueeze(-1)
-        return gamma + 1.0, beta
-
-
-class SmallUNet(nn.Module):
-    """
-    Universal Prompt-Conditioned Specialist U-Net.
-    Extracts and inpaints any requested sound stem from dense acoustic mixtures.
-    """
-
-    def __init__(
-        self,
-        n_fft: int = 512,
-        hop_length: int = 160,
-        base_channels: int = 16,
-        num_classes: int = 32,
-        mode: Literal["generate", "mask"] = "generate",
-    ):
-        super().__init__()
-
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-        self.mode = mode
         self.base_channels = base_channels
-        self.num_classes = num_classes
-        self.stem_map: Dict[str, int] = {}
 
-        # Encoder
-        self.inc = DoubleConv(2, base_channels)
-        self.down1 = Down(base_channels, base_channels * 2)
-        self.down2 = Down(base_channels * 2, base_channels * 4)
-        self.down3 = Down(base_channels * 4, base_channels * 8)
-
-        # Bottleneck (256 channels for base_channels=16)
-        self.down4 = Down(base_channels * 8, base_channels * 16)
-
-        # FiLM Prompt Conditioning (supports up to num_classes dynamically)
-        self.film = FiLMConditioner(
-            num_classes=num_classes,
-            embed_dim=128,
-            feature_dim=base_channels * 16,
+        # Initial Feature Projection (2 -> 48)
+        self.in_conv = nn.Sequential(
+            nn.Conv2d(2, base_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(base_channels),
+            nn.LeakyReLU(0.2, inplace=True),
         )
 
-        # Decoder
-        self.up1 = Up(base_channels * 16 + base_channels * 8, base_channels * 8)
-        self.up2 = Up(base_channels * 8 + base_channels * 4, base_channels * 4)
-        self.up3 = Up(base_channels * 4 + base_channels * 2, base_channels * 2)
-        self.up4 = Up(base_channels * 2 + base_channels, base_channels)
+        # Encoder Stages (Downsampling)
+        # Stage 1: 48 -> 96
+        self.down1_pool = nn.MaxPool2d(2)
+        self.down1_conv = nn.Sequential(
+            nn.Conv2d(base_channels, base_channels * 2, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(base_channels * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            DilatedResidualBlock(base_channels * 2, dilation=1),
+        )
 
-        # Output projection
-        self.outc = nn.Conv2d(base_channels, 2, kernel_size=1)
-        self.sigmoid = nn.Sigmoid()
+        # Stage 2: 96 -> 192
+        self.down2_pool = nn.MaxPool2d(2)
+        self.down2_conv = nn.Sequential(
+            nn.Conv2d(base_channels * 2, base_channels * 4, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(base_channels * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            DilatedResidualBlock(base_channels * 4, dilation=2),
+        )
 
-    def set_stem_map(self, stem_map: Dict[str, int]):
-        self.stem_map = stem_map
+        # Stage 3: 192 -> 384
+        self.down3_pool = nn.MaxPool2d(2)
+        self.down3_conv = nn.Sequential(
+            nn.Conv2d(base_channels * 4, base_channels * 8, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(base_channels * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+            DilatedResidualBlock(base_channels * 8, dilation=4),
+        )
 
-    def parse_prompt(self, prompt: Union[torch.Tensor, str, List[str], int], batch_size: int, device: torch.device) -> torch.Tensor:
-        if prompt is None:
-            return torch.zeros(batch_size, dtype=torch.long, device=device)
+        # Bottleneck: 384 -> 768 (Deep Semantic Latent Space)
+        self.down4_pool = nn.MaxPool2d(2)
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(base_channels * 8, base_channels * 16, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(base_channels * 16),
+            nn.LeakyReLU(0.2, inplace=True),
+            DilatedResidualBlock(base_channels * 16, dilation=1),
+            DilatedResidualBlock(base_channels * 16, dilation=2),
+        )
 
-        if isinstance(prompt, torch.Tensor):
-            return prompt.to(device=device, dtype=torch.long)
+        # Decoder Stages (Upsampling with Skip Connections)
+        # Stage 3 Up: (768 + 384) -> 384
+        self.up3 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
+        self.up3_conv = nn.Sequential(
+            nn.Conv2d(base_channels * 16 + base_channels * 8, base_channels * 8, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(base_channels * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+            DilatedResidualBlock(base_channels * 8, dilation=2),
+        )
 
-        if isinstance(prompt, int):
-            return torch.full((batch_size,), prompt, dtype=torch.long, device=device)
+        # Stage 2 Up: (384 + 192) -> 192
+        self.up2 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
+        self.up2_conv = nn.Sequential(
+            nn.Conv2d(base_channels * 8 + base_channels * 4, base_channels * 4, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(base_channels * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            DilatedResidualBlock(base_channels * 4, dilation=1),
+        )
 
-        if isinstance(prompt, str):
-            p = prompt.lower().strip()
-            cid = self.stem_map.get(p, 0)
-            if cid == 0 and p not in ["speech", "voice", "clean"]:
-                # Fuzzy keyword matching
-                for key, val in self.stem_map.items():
-                    if key in p or p in key:
-                        cid = val
-                        break
-            return torch.full((batch_size,), cid, dtype=torch.long, device=device)
+        # Stage 1 Up: (192 + 96) -> 96
+        self.up1 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
+        self.up1_conv = nn.Sequential(
+            nn.Conv2d(base_channels * 4 + base_channels * 2, base_channels * 2, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(base_channels * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            DilatedResidualBlock(base_channels * 2, dilation=1),
+        )
 
-        if isinstance(prompt, (list, tuple)):
-            cids = [self.parse_prompt(p, 1, device).item() for p in prompt]
-            return torch.tensor(cids, dtype=torch.long, device=device)
+        # Final Stage Up: (96 + 48) -> 48
+        self.up0 = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
+        self.up0_conv = nn.Sequential(
+            nn.Conv2d(base_channels * 2 + base_channels, base_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(base_channels),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
 
-        return torch.zeros(batch_size, dtype=torch.long, device=device)
+        # Output Complex STFT Projection: 48 -> 2 [Real, Imag]
+        self.out_conv = nn.Conv2d(base_channels, 2, kernel_size=1)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        prompt: Optional[Union[torch.Tensor, str, List[str], int]] = None,
-    ) -> torch.Tensor:
-        batch_size = x.shape[0]
-        prompt_tensor = self.parse_prompt(prompt, batch_size, x.device)
+    def _pad_and_cat(self, upsampled: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        diffY = skip.size()[2] - upsampled.size()[2]
+        diffX = skip.size()[3] - upsampled.size()[3]
+        upsampled = F.pad(upsampled, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+        return torch.cat([skip, upsampled], dim=1)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Encoder
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
+        x0 = self.in_conv(x)                      # [B, 48, F, T]
+        x1 = self.down1_conv(self.down1_pool(x0)) # [B, 96, F/2, T/2]
+        x2 = self.down2_conv(self.down2_pool(x1)) # [B, 192, F/4, T/4]
+        x3 = self.down3_conv(self.down3_pool(x2)) # [B, 384, F/8, T/8]
 
         # Bottleneck
-        x5 = self.down4(x4)
-
-        # FiLM Conditioning
-        gamma, beta = self.film(prompt_tensor)
-        x5 = gamma * x5 + beta
+        b = self.bottleneck(self.down4_pool(x3))  # [B, 768, F/16, T/16]
 
         # Decoder
-        u1 = self.up1(x5, x4)
-        u2 = self.up2(u1, x3)
-        u3 = self.up3(u2, x2)
-        u4 = self.up4(u3, x1)
+        u3 = self.up3_conv(self._pad_and_cat(self.up3(b), x3))
+        u2 = self.up2_conv(self._pad_and_cat(self.up2(u3), x2))
+        u1 = self.up1_conv(self._pad_and_cat(self.up1(u2), x1))
+        u0 = self.up0_conv(self._pad_and_cat(self.up0(u1), x0))
 
-        raw_output = self.outc(u4)
+        return self.out_conv(u0)
 
-        if self.mode == "generate":
-            return raw_output
-        else:
-            mask = self.sigmoid(raw_output)
-            return mask * x
+
+# =========================================================================
+# 2. SPECTRAL-NORMALIZED MULTI-SCALE PATCHGAN DISCRIMINATOR (~8.6M Params)
+# =========================================================================
+
+class DiscriminatorScale(nn.Module):
+    """Single scale patch discriminator with Spectral Normalization (HiFi-GAN standard)"""
+
+    def __init__(self):
+        super().__init__()
+        self.conv1 = spectral_norm(nn.Conv2d(2, 64, kernel_size=5, stride=2, padding=2))
+        self.act1 = nn.LeakyReLU(0.2, inplace=True)
+
+        self.conv2 = spectral_norm(nn.Conv2d(64, 128, kernel_size=5, stride=2, padding=2))
+        self.act2 = nn.LeakyReLU(0.2, inplace=True)
+
+        self.conv3 = spectral_norm(nn.Conv2d(128, 256, kernel_size=5, stride=2, padding=2))
+        self.act3 = nn.LeakyReLU(0.2, inplace=True)
+
+        self.conv4 = spectral_norm(nn.Conv2d(256, 512, kernel_size=5, stride=2, padding=2))
+        self.act4 = nn.LeakyReLU(0.2, inplace=True)
+
+        self.out_conv = spectral_norm(nn.Conv2d(512, 1, kernel_size=3, padding=1))
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        features = []
+        x1 = self.act1(self.conv1(x))
+        features.append(x1)
+
+        x2 = self.act2(self.conv2(x1))
+        features.append(x2)
+
+        x3 = self.act3(self.conv3(x2))
+        features.append(x3)
+
+        x4 = self.act4(self.conv4(x3))
+        features.append(x4)
+
+        score = self.out_conv(x4)
+        return score, features
+
+
+class MultiScaleSpeechDiscriminator(nn.Module):
+    """
+    Multi-Scale PatchGAN Discriminator with Spectral Normalization.
+    Judges full-resolution spectrogram patches + 2x downscaled global harmonic structures.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.disc_full = DiscriminatorScale()
+        self.disc_down = DiscriminatorScale()
+        self.downsample = nn.AvgPool2d(2)
+
+    def forward(self, x: torch.Tensor) -> Tuple[List[torch.Tensor], List[List[torch.Tensor]]]:
+        score1, feat1 = self.disc_full(x)
+        score2, feat2 = self.disc_down(self.downsample(x))
+        return [score1, score2], [feat1, feat2]
+
+
+# Aliases
+SpeechSpecialistUNet = HighResSpeechGenerator
+SmallUNet = HighResSpeechGenerator
+
+
+if __name__ == "__main__":
+    gen = HighResSpeechGenerator(base_channels=48)
+    disc = MultiScaleSpeechDiscriminator()
+    g_params = sum(p.numel() for p in gen.parameters() if p.requires_grad)
+    d_params = sum(p.numel() for p in disc.parameters() if p.requires_grad)
+    print(f"Generator Params:     {g_params:,} (~{g_params*4/1024/1024:.2f} MB)")
+    print(f"Discriminator Params: {d_params:,} (~{d_params*4/1024/1024:.2f} MB)")
+    print(f"Total Pipeline:       {g_params + d_params:,} (~{(g_params+d_params)*4/1024/1024:.2f} MB)")
