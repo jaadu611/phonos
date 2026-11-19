@@ -1,50 +1,116 @@
-# AudioForge
+# Phonos — Ultra-Compact Universal 44.1kHz Speech Restorer
 
-Forensic audio separation and analysis toolkit. Extract, isolate, and amplify specific sounds from complex audio mixtures using text queries.
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" height="20"></a>
+  <a href="https://huggingface.co/jaadu611/phonos"><img src="https://img.shields.io/badge/Model%20Size-78.7%20MB-success.svg" alt="Model Size" height="20"></a>
+  <a href="https://huggingface.co/jaadu611/phonos"><img src="https://img.shields.io/badge/Model-phonos__v1.0.pt-2ea44f.svg" alt="Model Weights" height="20"></a>
+  <a href="#universal-restoration-capabilities"><img src="https://img.shields.io/badge/Speed-11.8x%20Real--Time-brightgreen.svg" alt="Inference Speed" height="20"></a>
+  <a href="#universal-restoration-capabilities"><img src="https://img.shields.io/badge/Fidelity-44.1%20kHz%20Studio-orange.svg" alt="Audio Quality" height="20"></a>
+</p>
 
-## Features
+**Phonos** is an ultra-compact, quantized distribution of the state-of-the-art **[VoiceFixer](https://github.com/haoheliu/voicefixer)** 44.1kHz universal speech restoration model. Unlike standard subtractive noise filters that only attenuate background hiss, Phonos actively reconstructs damaged or missing speech harmonics up to full 44.1kHz studio bandwidth.
 
-- **Analyze**: Detect what sounds are present in any audio
-- **Extract**: Isolate specific sounds using natural language queries
-- **Amplify**: Boost extracted sounds for analysis
-- **Remove**: Strip unwanted sounds from recordings
+Operating on a selective **Mixed NF4 / FP8 Precision Architecture**, Phonos delivers the complete studio-grade speech recovery of VoiceFixer in a compact **78.7 MB package** (compressed from ~440 MB), running with **<950 MB VRAM** at **11.8x real-time** on consumer hardware.
 
-## Installation
+---
+
+## Universal Restoration Capabilities
+
+Phonos addresses the four core degradation modes of real-world audio:
+
+| Degradation Challenge | Problem in Raw Recording | Phonos Restoration Mechanism |
+|:---|:---|:---|
+| **Bandwidth Truncation** | Narrowband 3.4kHz–8kHz phone/radio audio sounds muffled | **44.1 kHz Resynthesis**: Generates missing high-frequency harmonics (0–22.05 kHz) using learned neural vocoder priors. |
+| **Acoustic Reverberation** | Echo, room reflections, and cavernous hall acoustics | **Dereverberation**: Deconvolves long impulse responses ($T_{60} > 0.8\text{s}$) to restore upfront direct-path studio proximity. |
+| **Waveform Clipping** | Harsh distortion and flat-topped peak saturation | **Peak Inpainting**: Reconstructs rounded wave crests and strips harmonic splatter. |
+| **Extreme Background Noise** | Babble, machinery, and non-stationary noise at 0 dB SNR | **Neural Denoising**: Attenuates interference without phase degradation. |
+
+---
+
+## Audio Demonstration Suite (`examples/`)
+
+Verified across authentic degradation scenarios in `examples/`:
+
+| Scenario (`examples/`) | Input Degradation | Restored Output (44.1kHz Studio) |
+|:---|:---|:---|
+| **01_telephone_bandwidth_extension** | Muffled 3.4kHz telephone lowpass filter | Full-bandwidth 44.1kHz vocal presence with high-shelf air |
+| **02_cavernous_room_dereverberation** | Large hall echo ($T_{60} = 0.85\text{s}$) | Dry, intimate vocal isolation with room echo stripped |
+| **03_severe_clipped_distortion** | Hard-clipped waveform (-14 dB saturation) | Restored natural dynamics and harmonic smoothness |
+| **04_extreme_ambient_noise** | Equal-volume non-stationary babble (0 dB SNR) | Isolated voice with background noise floor eliminated |
+
+---
+
+## Quick Start
+
+### 1. Installation
 
 ```bash
-git clone https://github.com/yourusername/audioforge
-cd audioforge
-pip install -e .
+git clone https://github.com/jaadu611/phonos
+cd phonos
+
+# Create and activate virtual environment
+python3.11 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-## Usage
+### 2. Model Checkpoint (`phonos_v1.0.pt`)
 
+The model checkpoint (`phonos_v1.0.pt`, 78.7 MB) is automatically fetched on first run from [Hugging Face](https://huggingface.co/jaadu611/phonos) or GitHub Releases.
+
+Optional manual download:
 ```bash
-# Analyze what's in an audio file
-audioforge analyze recording.wav
-
-# Extract helicopter sounds
-audioforge extract recording.wav --query "helicopter rotor sound"
-
-# Extract and amplify gunfire
-audioforge extract recording.wav --query "gunshots" --gain 20
-
-# Remove speech, keep background
-audioforge extract recording.wav --query "all sounds except human speech"
+mkdir -p checkpoints
+wget -O checkpoints/phonos_v1.0.pt https://huggingface.co/jaadu611/phonos/resolve/main/phonos_v1.0.pt
 ```
 
-## Hardware Requirements
+### 3. Usage
 
-- 4GB+ VRAM (tested on RTX 3050)
-- 16GB RAM
-- CPU-only mode available (slower)
+#### Restore Any Recording to 44.1kHz Studio Audio
+```bash
+# Standard studio enhancement (with harmonic presence exciter)
+python cli.py recording.wav -o restored_studio.wav
+# or
+python cli.py enhance recording.wav -o restored_studio.wav
 
-## Architecture
-
+# Disable harmonic exciter (raw neural restoration)
+python cli.py enhance recording.wav --no-exciter -o restored_studio.wav
 ```
-Input Audio → Analyzer (detect sounds) → Separator (extract) → Amplifier → Output
+
+#### Inspect Audio File Metadata
+```bash
+python cli.py info recording.wav
 ```
+
+---
+
+## Architecture Specifications
+
+* **Center Bottleneck (Encoder 5-6, Conv 7, Decoder 1-2)**: 4-bit NormalFloat (NF4).
+* **Outer Feature Stages & Vocoder**: 8-bit Float (FP8).
+* **Normalization Statistics**: 16-bit Float (FP16).
+* **Chunking Runtime**: 5.0-second window with automatic reflection padding for short remainders.
+
+---
+
+## Acknowledgments & Attribution
+
+Phonos is built directly on the foundational speech restoration research and model architecture of **[VoiceFixer](https://github.com/haoheliu/voicefixer)**. All core neural modeling, training, vocoder synthesis, and baseline weights are the work of Haohe Liu and collaborators:
+
+> **VoiceFixer: A Unified Framework for High-Fidelity Speech Restoration**  
+> *Haohe Liu, Xubo Liu, Qiuqiang Kong, Qiao Tian, Yan Zhao, DeLiang Wang, Chuanzeng Huang, Yuxuan Wang*  
+> Interspeech 2022 — [Paper on arXiv](https://arxiv.org/abs/2109.13731) | [Official Repository](https://github.com/haoheliu/voicefixer)
+
+Phonos contributes post-training optimizations on top of VoiceFixer:
+* **Selective Mixed NF4/FP8 Quantization**: Compresses the original ~440 MB checkpoint down to 78.7 MB.
+* **Pruned Low-Memory Inference**: Slices GPU memory footprint to under 950 MB VRAM for consumer laptop GPUs.
+* **Harmonic Presence Exciter**: Post-processing saturation for high-frequency clarity.
+* **Standalone CLI**: Streamlined, single-file interface without heavy framework overhead.
+
+---
 
 ## License
 
-MIT
+This project is licensed under the [MIT License](LICENSE).

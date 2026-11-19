@@ -19,9 +19,8 @@ pretrained/
 *.flac
 *.ogg
 *.opus
-training_data/
-examples/test_audio/*
-!examples/test_audio/README.md
+!examples/*.wav
+!examples/**/*.wav
 
 # Python
 __pycache__/
