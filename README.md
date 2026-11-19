@@ -4,13 +4,14 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" height="20"></a>
   <a href="https://huggingface.co/jaadu611/phonos"><img src="https://img.shields.io/badge/Model%20Size-78.7%20MB-success.svg" alt="Model Size" height="20"></a>
   <a href="https://huggingface.co/jaadu611/phonos"><img src="https://img.shields.io/badge/Model-phonos__v1.0.pt-2ea44f.svg" alt="Model Weights" height="20"></a>
-  <a href="#universal-restoration-capabilities"><img src="https://img.shields.io/badge/Speed-11.8x%20Real--Time-brightgreen.svg" alt="Inference Speed" height="20"></a>
+  <a href="#universal-restoration-capabilities"><img src="https://img.shields.io/badge/GPU%20Speed-11.8x%20Real--Time-brightgreen.svg" alt="GPU Speed" height="20"></a>
+  <a href="#universal-restoration-capabilities"><img src="https://img.shields.io/badge/CPU%20Speed-1.1x%20Real--Time-blue.svg" alt="CPU Speed" height="20"></a>
   <a href="#universal-restoration-capabilities"><img src="https://img.shields.io/badge/Fidelity-44.1%20kHz%20Studio-orange.svg" alt="Audio Quality" height="20"></a>
 </p>
 
 **Phonos** is an ultra-compact, quantized distribution of the state-of-the-art **[VoiceFixer](https://github.com/haoheliu/voicefixer)** 44.1kHz universal speech restoration model. Unlike standard subtractive noise filters that only attenuate background hiss, Phonos actively reconstructs damaged or missing speech harmonics up to full 44.1kHz studio bandwidth.
 
-Operating on a selective **Mixed NF4 / FP8 Precision Architecture**, Phonos delivers the complete studio-grade speech recovery of VoiceFixer in a compact **78.7 MB package** (compressed from ~440 MB), running with **<950 MB VRAM** at **11.8x real-time** on consumer hardware.
+Operating on a selective **Mixed NF4 / FP8 Precision Architecture**, Phonos delivers the complete studio-grade speech recovery of VoiceFixer in a compact **78.7 MB package** (compressed from ~440 MB). It runs at **11.8x real-time (<950 MB VRAM)** on consumer GPUs, and **1.1x real-time (<450 MB RAM, 0 MB VRAM)** on pure CPU — making it lightweight enough for mobile edge hardware, standard laptops without dedicated GPUs, and low-resource environments.
 
 ---
 
@@ -86,10 +87,11 @@ python cli.py info recording.wav
 
 ---
 
-## Architecture Specifications
+## Architecture & Performance Specifications
 
-* **Center Bottleneck (Encoder 5-6, Conv 7, Decoder 1-2)**: 4-bit NormalFloat (NF4).
-* **Outer Feature Stages & Vocoder**: 8-bit Float (FP8).
+* **Quantization Scheme**: Selective Mixed 4-bit NormalFloat (NF4) for bottleneck stages; 8-bit Float (FP8) for outer stages and neural vocoder.
+* **GPU Throughput**: 11.8x real-time on NVIDIA RTX 3050 Laptop GPU (<950 MB VRAM).
+* **CPU Throughput**: 1.1x real-time on standard laptop CPU (0 MB VRAM, <450 MB RAM).
 * **Normalization Statistics**: 16-bit Float (FP16).
 * **Chunking Runtime**: 5.0-second window with automatic reflection padding for short remainders.
 
